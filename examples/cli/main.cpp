@@ -914,26 +914,49 @@ int main(int argc, const char* argv[]) {
 
         // Resize input image ...
         if (params.height != height || params.width != width) {
-            printf("resize input image from %dx%d to %dx%d\n", width, height, params.width, params.height);
-            int resized_height = params.height;
-            int resized_width  = params.width;
+            //printf("resize input image from %dx%d to %dx%d\n", width, height, params.width, params.height);
+            //int resized_height = params.height;
+            //int resized_width  = params.width;
 
-            uint8_t* resized_image_buffer = (uint8_t*)malloc(resized_height * resized_width * 3);
-            if (resized_image_buffer == NULL) {
-                fprintf(stderr, "error: allocate memory for resize input image\n");
+            //uint8_t* resized_image_buffer = (uint8_t*)malloc(resized_height * resized_width * 3);
+            //if (resized_image_buffer == NULL) {
+            //    fprintf(stderr, "error: allocate memory for resize input image\n");
+            LOG_INFO("resizing input image from %dx%d to %dx%d", width, height, params.width, params.height);
+
+            // Convert original uint8_t image to float
+            float* float_image_buffer = (float*)malloc(width * height * 3 * sizeof(float));
+            if (float_image_buffer == NULL) {
+                LOG_ERROR("malloc failed for float image buffer");
                 free(input_image_buffer);
                 return 1;
             }
-            stbir_resize(input_image_buffer, width, height, 0,
-                         resized_image_buffer, resized_width, resized_height, 0, STBIR_TYPE_UINT8,
-                         3 /*RGB channel*/, STBIR_ALPHA_CHANNEL_NONE, 0,
-                         STBIR_EDGE_CLAMP, STBIR_EDGE_CLAMP,
-                         STBIR_FILTER_BOX, STBIR_FILTER_BOX,
-                         STBIR_COLORSPACE_SRGB, nullptr);
+            //stbir_resize(input_image_buffer, width, height, 0,
+            //             resized_image_buffer, resized_width, resized_height, 0, STBIR_TYPE_UINT8,
+            //             3 /*RGB channel*/, STBIR_ALPHA_CHANNEL_NONE, 0,
+            //             STBIR_EDGE_CLAMP, STBIR_EDGE_CLAMP,
+            //             STBIR_FILTER_BOX, STBIR_FILTER_BOX,
+            //             STBIR_COLORSPACE_SRGB, nullptr);
 
-            // Save resized result
+            //// Save resized result
+            for (int j = 0; j < width * height * 3; ++j) {
+              float_image_buffer[j] = input_image_buffer[j] / 255.0f; // Convert to float in [0, 1]
+            }
             free(input_image_buffer);
-            input_image_buffer = resized_image_buffer;
+            //input_image_buffer = resized_image_buffer;
+
+            // Resize the float image
+            float* resized_float_buffer = (float*)malloc(params.width * params.height * 3 * sizeof(float));
+            stbir_resize_float(float_image_buffer, width, height, 0,
+                               resized_float_buffer, params.width, params.height, 0, 3);
+            free(float_image_buffer);
+
+            // Convert resized float image back to uint8_t [0, 255] for consistency
+            input_image_buffer = (uint8_t*)malloc(params.width * params.height * 3);
+            for (int j = 0; j < params.width * params.height * 3; ++j) {
+                input_image_buffer[j] = (uint8_t)(std::max(0.0f, std::min(255.0f, resized_float_buffer[j] * 255.0f)));
+            }
+            free(resized_float_buffer);
+            //input_image_buffer = resized_image_buffer;
         }
     } else if (params.mode == EDIT) {
         vae_decode_only = false;
@@ -1012,7 +1035,8 @@ int main(int argc, const char* argv[]) {
                                        3,
                                        control_image_buffer};
         if (params.canny_preprocess) {  // apply preprocessor
-            control_image->data = preprocess_canny(control_image->data,
+            //control_image->data = preprocess_canny(control_image->data,
+            uint8_t* canny_image_data = preprocess_canny(control_image->data,
                                                    control_image->width,
                                                    control_image->height,
                                                    0.08f,
@@ -1020,6 +1044,8 @@ int main(int argc, const char* argv[]) {
                                                    0.8f,
                                                    1.0f,
                                                    false);
+            free(control_image->data); // Free the original buffer
+            control_image->data = canny_image_data;
         }
     }
 
