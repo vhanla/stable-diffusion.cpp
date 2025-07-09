@@ -164,10 +164,12 @@ struct LoraModel : public GGMLRunner {
     }
 
     ggml_tensor* to_f32(ggml_context* ctx, ggml_tensor* a) {
-        auto out = ggml_reshape_1d(ctx, a, ggml_nelements(a));
+    /*    auto out = ggml_reshape_1d(ctx, a, ggml_nelements(a));
         out      = ggml_get_rows(ctx, out, zero_index);
         out      = ggml_reshape(ctx, out, a);
-        return out;
+        return out;*/
+      // Using ggml_cpy is the robust and backend-agnostic way to dequantize a tensor.
+        return ggml_cpy(ctx, a, ggml_new_tensor(ctx, GGML_TYPE_F32, ggml_n_dims(a), a->ne));
     }
 
     std::vector<std::string> to_lora_keys(std::string blk_name, SDVersion version) {
