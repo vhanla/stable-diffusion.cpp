@@ -2,7 +2,10 @@
 #define __CLIP_HPP__
 
 #include "ggml_extend.hpp"
+#include <thread>
 #include "model.h"
+#include <bitset>
+#include <unordered_map>
 
 /*================================================== CLIPTokenizer ===================================================*/
 
@@ -33,22 +36,27 @@ std::pair<std::unordered_map<std::string, float>, std::string> extract_and_remov
 
 std::vector<std::pair<int, std::u32string>> bytes_to_unicode() {
     std::vector<std::pair<int, std::u32string>> byte_unicode_pairs;
-    std::set<int> byte_set;
+    //std::set<int> byte_set;
+    std::bitset<256> byte_set;
     for (int b = static_cast<int>('!'); b <= static_cast<int>('~'); ++b) {
-        byte_set.insert(b);
+        //byte_set.insert(b);
+        byte_set[b] = 1;
         byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
     }
     for (int b = 161; b <= 172; ++b) {
-        byte_set.insert(b);
+        //byte_set.insert(b);
+        byte_set[b] = 1;
         byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
     }
     for (int b = 174; b <= 255; ++b) {
-        byte_set.insert(b);
+        //byte_set.insert(b);
+        byte_set[b] = 1;
         byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
     }
     int n = 0;
     for (int b = 0; b < 256; ++b) {
-        if (byte_set.find(b) == byte_set.end()) {
+        //if (byte_set.find(b) == byte_set.end()) {
+        if (!byte_set[b]) {
             byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(n + 256)));
             ++n;
         }
@@ -61,13 +69,28 @@ std::vector<std::pair<int, std::u32string>> bytes_to_unicode() {
 
 typedef std::function<bool(std::string&, std::vector<int32_t>&)> on_new_token_cb_t;
 
+struct pair_hash {
+  template <class T1, class T2>
+  std::size_t operator()(const std::pair<T1, T2>& p) const {
+    auto h1 = std::hash<T1>{}(p.first);
+    auto h2 = std::hash<T2>{}(p.second);
+    // Simple mixing of hashes
+    return h1 ^ (h2 << 1);
+  }
+};
+
 class CLIPTokenizer {
 private:
-    std::map<int, std::u32string> byte_encoder;
-    std::map<std::u32string, int> byte_decoder;
-    std::map<std::u32string, int> encoder;
-    std::map<int, std::u32string> decoder;
-    std::map<std::pair<std::u32string, std::u32string>, int> bpe_ranks;
+    //std::map<int, std::u32string> byte_encoder;
+    //std::map<std::u32string, int> byte_decoder;
+    //std::map<std::u32string, int> encoder;
+    //std::map<int, std::u32string> decoder;
+    //std::map<std::pair<std::u32string, std::u32string>, int> bpe_ranks;
+    std::unordered_map<int, std::u32string> byte_encoder;
+    std::unordered_map<std::u32string, int> byte_decoder;
+    std::unordered_map<std::u32string, int> encoder;
+    std::unordered_map<int, std::u32string> decoder;
+    std::unordered_map<std::pair<std::u32string, std::u32string>, int, pair_hash> bpe_ranks;
     std::regex pat;
     int encoder_len;
     int bpe_len;
@@ -130,7 +153,8 @@ public:
     void load_from_merges(const std::string& merges_utf8_str) {
         auto byte_unicode_pairs = bytes_to_unicode();
         // printf("byte_unicode_pairs have %lu pairs \n", byte_unicode_pairs.size());
-        byte_encoder = std::map<int, std::u32string>(byte_unicode_pairs.begin(), byte_unicode_pairs.end());
+        //byte_encoder = std::map<int, std::u32string>(byte_unicode_pairs.begin(), byte_unicode_pairs.end());
+        byte_encoder = std::unordered_map<int, std::u32string>(byte_unicode_pairs.begin(), byte_unicode_pairs.end());
         for (auto& pair : byte_unicode_pairs) {
             byte_decoder[pair.second] = pair.first;
         }
@@ -215,22 +239,35 @@ public:
             return token + utf8_to_utf32("</w>");
         }
 
+#include <limits>
         while (true) {
-            auto min_pair_iter = std::min_element(pairs.begin(),
-                                                  pairs.end(),
-                                                  [&](const std::pair<std::u32string, std::u32string>& a,
-                                                      const std::pair<std::u32string, std::u32string>& b) {
-                                                      if (bpe_ranks.find(a) == bpe_ranks.end()) {
-                                                          return false;
-                                                      } else if (bpe_ranks.find(b) == bpe_ranks.end()) {
-                                                          return true;
-                                                      }
-                                                      return bpe_ranks.at(a) < bpe_ranks.at(b);
-                                                  });
+//            auto min_pair_iter = std::min_element(pairs.begin(),
+//                                                  pairs.end(),
+//                                                  [&](const std::pair<std::u32string, std::u32string>& a,
+//                                                      const std::pair<std::u32string, std::u32string>& b) {
+//                                                      if (bpe_ranks.find(a) == bpe_ranks.end()) {
+//                                                          return false;
+//                                                      } else if (bpe_ranks.find(b) == bpe_ranks.end()) {
+//                                                          return true;
+//                                                      }
+//                                                      return bpe_ranks.at(a) < bpe_ranks.at(b);
+//                                                  });
+//
+//            const std::pair<std::u32string, std::u32string>& bigram = *min_pair_iter;
+//
+//            if (bpe_ranks.find(bigram) == bpe_ranks.end()) {
+              std::pair<std::u32string, std::u32string> bigram;  
+              int min_rank = std::numeric_limits<int>::max();
 
-            const std::pair<std::u32string, std::u32string>& bigram = *min_pair_iter;
+              for (const auto& pair : pairs) {
+                auto it = bpe_ranks.find(pair);
+                if (it != bpe_ranks.end() && it->second < min_rank) {
+                    min_rank = it->second;
+                    bigram = pair;
+                }
+              }
 
-            if (bpe_ranks.find(bigram) == bpe_ranks.end()) {
+              if (min_rank == std::numeric_limits<int>::max()) {
                 break;
             }
 
@@ -262,6 +299,7 @@ public:
             if (word.size() == 1) {
                 break;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));  // avoid busy loop
             pairs = get_pairs(word);
         }
 
