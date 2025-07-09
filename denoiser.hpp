@@ -3,6 +3,7 @@
 
 #include "ggml_extend.hpp"
 #include "gits_noise.inl"
+#include <thread>
 
 /*================================================= CompVisDenoiser ==================================================*/
 
@@ -553,6 +554,7 @@ static void sample_k_diffusion(sample_method_t method,
                         }
                     }
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));  // Sleep to simulate time passing
             }
         } break;
         case EULER:  // Implemented without any sigma churn
