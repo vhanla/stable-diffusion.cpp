@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <thread>
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -440,22 +441,32 @@ __STATIC_INLINE__ void sd_image_f32_to_tensor(const float* image_data,
     }
 }
 
-__STATIC_INLINE__ void ggml_split_tensor_2d(struct ggml_tensor* input,
+//__STATIC_INLINE__ void ggml_split_tensor_2d(struct ggml_tensor* input,
+__STATIC_INLINE__ void ggml_split_tensor_2d(struct ggml_context* ctx,
+                                            struct ggml_tensor* input,
                                             struct ggml_tensor* output,
                                             int x,
                                             int y) {
-    int64_t width    = output->ne[0];
-    int64_t height   = output->ne[1];
-    int64_t channels = output->ne[2];
-    GGML_ASSERT(input->type == GGML_TYPE_F32 && output->type == GGML_TYPE_F32);
-    for (int iy = 0; iy < height; iy++) {
-        for (int ix = 0; ix < width; ix++) {
-            for (int k = 0; k < channels; k++) {
-                float value = ggml_tensor_get_f32(input, ix + x, iy + y, k);
-                ggml_tensor_set_f32(output, value, ix, iy, k);
-            }
-        }
-    }
+    //int64_t width    = output->ne[0];
+    //int64_t height   = output->ne[1];
+    //int64_t channels = output->ne[2];
+    //GGML_ASSERT(input->type == GGML_TYPE_F32 && output->type == GGML_TYPE_F32);
+    //for (int iy = 0; iy < height; iy++) {
+    //    for (int ix = 0; ix < width; ix++) {
+    //        for (int k = 0; k < channels; k++) {
+    //            float value = ggml_tensor_get_f32(input, ix + x, iy + y, k);
+    //            ggml_tensor_set_f32(output, value, ix, iy, k);
+    //        }
+    //    }
+    //}
+    struct ggml_tensor* view = ggml_view_4d(ctx,
+        input,
+        output->ne[0], output->ne[1], output->ne[2], output->ne[3],
+        input->nb[1], input->nb[2], input->nb[3],
+        y * input->nb[1] + x * input->nb[0]);
+    struct ggml_cgraph* gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, ggml_cpy(ctx, view, output));
+    ggml_graph_compute_with_ctx(ctx, gf, 1);
 }
 
 // unclamped -> expects x in the range [0-1]
@@ -650,13 +661,15 @@ __STATIC_INLINE__ void sd_tiling(ggml_tensor* input, ggml_tensor* output, const 
                 last_x = true;
             }
             int64_t t1 = ggml_time_ms();
-            ggml_split_tensor_2d(input, input_tile, x, y);
+            //ggml_split_tensor_2d(input, input_tile, x, y);
+            ggml_split_tensor_2d(tiles_ctx, input, input_tile, x, y);
             on_processing(input_tile, output_tile, false);
             ggml_merge_tensor_2d(output_tile, output, x * scale, y * scale, tile_overlap * scale);
             int64_t t2 = ggml_time_ms();
             last_time  = (t2 - t1) / 1000.0f;
             pretty_progress(tile_count, num_tiles, last_time);
             tile_count++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));  // yield to avoid blocking
         }
         last_x = false;
     }
