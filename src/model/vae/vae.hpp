@@ -280,7 +280,18 @@ public:
             int64_t H              = input.shape()[1] * scale_factor;
             float tile_overlap;
             int tile_size_x, tile_size_y;
-            get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, input.shape()[0], input.shape()[1]);
+            sd_tiling_params_t effective_params = tiling_params;
+            // Enabled without any tile size degrades to a single full-frame
+            // tile: it OOMs exactly like untiled decode while also
+            // disabling the OOM retry (see prepare_vae_decode_retry_tiling).
+            // Fall back to the same half-latent tiling the retry path uses.
+            if (effective_params.tile_size_x <= 0 && effective_params.rel_size_x <= 0.f) {
+                effective_params.rel_size_x = 0.5f;
+            }
+            if (effective_params.tile_size_y <= 0 && effective_params.rel_size_y <= 0.f) {
+                effective_params.rel_size_y = 0.5f;
+            }
+            get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, effective_params, input.shape()[0], input.shape()[1]);
             if (!silent) {
                 LOG_VERBOSE("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
             }
@@ -296,7 +307,7 @@ public:
                 circular_x,
                 circular_y,
                 true,
-                tiling_params,
+                effective_params,
                 "vae decode compute failed while processing a tile",
                 silent);
         } else {
