@@ -561,6 +561,83 @@ struct LoraModel : public GGMLRunner {
         return diff;
     }
 
+    // Some converters store gated MLPs fused (e.g. Qwen-Image-2.1
+    // img_mlp.gate_up) while LoRA files trained against diffusers naming
+    // ship split img_mlp.proj / img_mlp.gate_layer pairs. The block forward
+    // chunks the fused output gate-first, so apply both halves and
+    // concatenate gate-first. Returns nullptr when the pattern does not
+    // apply; callers fall back to the normal path. Only the runtime
+    // (activation-space) application is fused here.
+    ggml_tensor* get_fused_mlp_out_diff(ggml_context* ctx,
+                                        ggml_tensor* x,
+                                        ggml_tensor* model_weight,
+                                        WeightAdapter::ForwardParams forward_params,
+                                        const std::string& model_tensor_name,
+                                        std::vector<std::string>& used_tensors) {
+        const std::string fused_suffix = "img_mlp.gate_up.weight";
+        if (forward_params.op_type == WeightAdapter::ForwardParams::op_type_t::OP_CONV2D ||
+            !ends_with(model_tensor_name, fused_suffix)) {
+            return nullptr;
+        }
+        // A directly matching adapter takes precedence.
+        if (lora_tensors.find("lora." + model_tensor_name + ".lora_up") != lora_tensors.end()) {
+            return nullptr;
+        }
+        const std::string stem      = model_tensor_name.substr(0, model_tensor_name.size() - fused_suffix.size());
+        const std::string halves[2] = {stem + "img_mlp.gate_layer.weight", stem + "img_mlp.proj.weight"};
+        struct HalfSpec {
+            ggml_tensor* lora_up   = nullptr;
+            ggml_tensor* lora_down = nullptr;
+            float scale_value      = 1.0f;
+            std::string scale_tensor_name;
+        };
+        HalfSpec specs[2];
+        int64_t out_dim = 0;
+        for (int h = 0; h < 2; h++) {
+            auto up_it   = lora_tensors.find("lora." + halves[h] + ".lora_up");
+            auto down_it = lora_tensors.find("lora." + halves[h] + ".lora_down");
+            auto mid_it  = lora_tensors.find("lora." + halves[h] + ".lora_mid");
+            if (up_it == lora_tensors.end() || down_it == lora_tensors.end() || mid_it != lora_tensors.end()) {
+                return nullptr;
+            }
+            specs[h].lora_up   = up_it->second;
+            specs[h].lora_down = down_it->second;
+            if (specs[h].lora_down->ne[0] != model_weight->ne[0] ||
+                specs[h].lora_up->ne[0] != specs[h].lora_down->ne[1]) {
+                return nullptr;
+            }
+            int64_t rank = specs[h].lora_down->ne[ggml_n_dims(specs[h].lora_down) - 1];
+            auto sc_it   = lora_tensors.find("lora." + halves[h] + ".scale");
+            if (sc_it != lora_tensors.end()) {
+                specs[h].scale_value       = scalar_value(sc_it->second);
+                specs[h].scale_tensor_name = sc_it->first;
+            } else {
+                auto al_it = lora_tensors.find("lora." + halves[h] + ".alpha");
+                if (al_it != lora_tensors.end()) {
+                    specs[h].scale_value       = scalar_value(al_it->second) / rank;
+                    specs[h].scale_tensor_name = al_it->first;
+                }
+            }
+            specs[h].scale_value *= multiplier;
+            out_dim += specs[h].lora_up->ne[1];
+        }
+        if (out_dim != model_weight->ne[1]) {
+            return nullptr;
+        }
+        ggml_tensor* branch_out[2] = {nullptr, nullptr};
+        for (int h = 0; h < 2; h++) {
+            ggml_tensor* lx = ggml_ext_linear(ctx, x, specs[h].lora_down, nullptr, forward_params.linear.force_prec_f32, forward_params.linear.scale);
+            lx              = ggml_ext_linear(ctx, lx, specs[h].lora_up, nullptr, forward_params.linear.force_prec_f32, forward_params.linear.scale);
+            branch_out[h]   = ggml_ext_scale(ctx, lx, specs[h].scale_value, true);
+            used_tensors.push_back("lora." + halves[h] + ".lora_up");
+            used_tensors.push_back("lora." + halves[h] + ".lora_down");
+            if (!specs[h].scale_tensor_name.empty()) {
+                used_tensors.push_back(specs[h].scale_tensor_name);
+            }
+        }
+        return ggml_concat(ctx, branch_out[0], branch_out[1], 0);
+    }
+
     ggml_tensor* get_out_diff(ggml_context* ctx,
                               ggml_backend_t backend,
                               ggml_tensor* x,
@@ -573,7 +650,12 @@ struct LoraModel : public GGMLRunner {
         std::vector<std::string> used_tensors;
         bool is_conv2d = forward_params.op_type == WeightAdapter::ForwardParams::op_type_t::OP_CONV2D;
 
+        out_diff = get_fused_mlp_out_diff(ctx, x, model_weight, forward_params, model_tensor_name, used_tensors);
+
         while (true) {
+            if (index == 0 && out_diff != nullptr) {
+                break;
+            }
             std::string key;
             if (index == 0) {
                 key = model_tensor_name;
